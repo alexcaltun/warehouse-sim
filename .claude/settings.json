@@ -20,10 +20,10 @@
       "Bash(git checkout *)",
       "Bash(git switch *)",
       "Bash(rm *)",
-      "Edit(./sim/core/types.py)",
       "Edit(./sim/core/world.py)",
       "Edit(./sim/baseline.py)",
-      "Edit(./AGENTS.md)"
+      "Edit(./AGENTS.md)",
+      "Edit(./sim/core/world.py)"
     ]
   }
 }

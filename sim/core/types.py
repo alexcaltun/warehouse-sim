@@ -95,6 +95,7 @@ class Metrics:
     makespan: Time = 0
     throughput: float = 0.0
     avg_wait: float = 0.0
+    max_wait: Time = 0
     avg_service: float = 0.0
     collisions: int = 0
     deadlocks: int = 0

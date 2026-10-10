@@ -39,6 +39,8 @@ def pickup_points(grid: Grid) -> list[Pos]:
     out: list[Pos] = []
     for p in free_cells(grid):
         r, c = p
+        if grid.at(p) is CellType.STATION:
+            continue  # statiile sunt destinatii, nu puncte de preluare
         for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
             if grid.in_bounds(q) and grid.at(q) is CellType.SHELF:
                 out.append(p)

@@ -1,0 +1,32 @@
+- id: T-001
+  owner: claude
+  title: "Engine de simulare cu pasi discreti"
+  touches: [sim/core/engine.py, tests/test_engine.py]
+  status: wip
+
+- id: T-002
+  owner: agy
+  title: "A* pe grid cu obstacole statice"
+  touches: [sim/planner/astar.py, tests/test_astar.py]
+  status: wip
+
+- id: T-003
+  owner: agy
+  title: "Alocatori: greedy-nearest si Hungarian"
+  touches: [sim/allocator/, tests/test_allocator.py]
+  blocked_by: [T-001]
+  status: todo
+
+- id: T-004
+  owner: claude
+  title: "Prevenire coliziuni: reservation table + prioritized planning"
+  touches: [sim/planner/prioritized.py, tests/test_collisions.py]
+  blocked_by: [T-002]
+  status: todo
+
+- id: T-005
+  owner: claude
+  title: "Sweep experimental + export CSV + grafice"
+  touches: [experiments/sweep.py, docs/results/]
+  blocked_by: [T-003, T-004]
+  status: todo

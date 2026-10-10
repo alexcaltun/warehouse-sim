@@ -5,6 +5,9 @@ from __future__ import annotations
 from sim.core.types import Allocator, Grid, Metrics, Planner, Pos, Robot, Task, Time
 
 DEADLOCK_TICKS = 50
+PARK_HORIZON = 20
+
+Key = tuple[Pos, Time]
 
 
 class Simulation:
@@ -16,6 +19,7 @@ class Simulation:
         planner: Planner,
         allocator: Allocator,
         max_ticks: int = 10_000,
+        use_reservations: bool = False,
     ) -> None:
         self.grid = grid
         self.robots: list[Robot] = sorted(robots, key=lambda r: r.id)
@@ -23,11 +27,15 @@ class Simulation:
         self.planner = planner
         self.allocator = allocator
         self.max_ticks = max_ticks
+        self.use_reservations = use_reservations
 
         self.t: Time = 0
         self.pending: list[Task] = []
         self.collisions = 0
         self.deadlocks = 0
+        self.reservations: dict[Key, str] = {}
+        self._owned: dict[str, list[Key]] = {rob.id: [] for rob in self.robots}
+        self._robot_by_id: dict[str, Robot] = {rob.id: rob for rob in self.robots}
         self._task_by_id: dict[str, Task] = {tk.id: tk for tk in self.tasks}
         self._stall = 0
         self._stopped = False
@@ -47,18 +55,20 @@ class Simulation:
 
         # 3. Planificare pentru robotii cu task si fara drum.
         failed: list[Robot] = []
-        for rob in self.robots:
-            if rob.task_id is None or rob.path:
-                continue
-            task = self._task_by_id[rob.task_id]
-            goal = task.pickup if rob.carrying is None else task.dropoff
-            if rob.pos == goal:
-                continue
-            path = self.planner.plan(self.grid, rob.pos, goal, None, t)
-            if path:
-                rob.path = list(path)
-            else:
-                failed.append(rob)
+        if self.use_reservations:
+            failed = self._plan_with_reservations(t)
+        else:
+            for rob in self.robots:
+                if rob.task_id is None or rob.path:
+                    continue
+                goal = self._goal(rob)
+                if rob.pos == goal:
+                    continue
+                path = self.planner.plan(self.grid, rob.pos, goal, None, t)
+                if path:
+                    rob.path = list(path)
+                else:
+                    failed.append(rob)
 
         # 4. Fiecare robot avanseaza exact o celula.
         prev: dict[str, Pos] = {rob.id: rob.pos for rob in self.robots}
@@ -160,6 +170,87 @@ class Simulation:
             rob.task_id = task_id
             task.assigned_to = robot_id
         self.pending = [tk for tk in self.pending if tk.assigned_to is None]
+
+    def _goal(self, rob: Robot) -> Pos:
+        task = self._task_by_id[rob.task_id or ""]
+        return task.pickup if rob.carrying is None else task.dropoff
+
+    def _needs_plan(self, rob: Robot) -> bool:
+        return rob.task_id is not None and not rob.path and rob.pos != self._goal(rob)
+
+    def _plan_with_reservations(self, t: Time) -> list[Robot]:
+        self.reservations = {k: v for k, v in self.reservations.items() if k[1] >= t}
+        for rid in sorted(self._owned):
+            self._owned[rid] = [k for k in self._owned[rid] if k[1] >= t]
+
+        queue: list[str] = []
+        # Robotii care urmeaza sa planifice ocupa doar celula curenta, la momentul t,
+        # ca vecinii sa le vada pozitia pentru verificarea schimbului de pozitii.
+        for rob in self.robots:
+            if self._needs_plan(rob):
+                self._release(rob.id)
+                self._reserve(rob.id, (rob.pos, t))
+                queue.append(rob.id)
+        for rob in self.robots:
+            if not rob.path and rob.id not in queue:
+                self._hold(rob, t, queue)
+
+        failed: list[Robot] = []
+        while queue:
+            queue.sort()
+            rob = self._robot_by_id[queue.pop(0)]
+            if not self._needs_plan(rob):
+                continue
+            self._release(rob.id)
+            self._reserve(rob.id, (rob.pos, t))
+            path = self.planner.plan(self.grid, rob.pos, self._goal(rob), self.reservations, t)
+            if path:
+                rob.path = list(path)
+                for i, cell in enumerate(rob.path):
+                    self._reserve(rob.id, (cell, t + 1 + i))
+                end = t + len(rob.path)
+                for tau in range(end + 1, end + PARK_HORIZON + 1):
+                    self._reserve(rob.id, (rob.path[-1], tau))
+            else:
+                failed.append(rob)
+                self._hold(rob, t, queue)
+        return failed
+
+    def _hold(self, rob: Robot, t: Time, queue: list[str]) -> None:
+        """Robot fara drum: rezerva celula curenta pe t..t+PARK_HORIZON. Un robot
+        care si-a planificat trecerea prin celula asta pierde drumul si replanifica."""
+        self._release(rob.id)
+        for tau in range(t, t + PARK_HORIZON + 1):
+            key = (rob.pos, tau)
+            owner = self.reservations.get(key)
+            if owner is not None and owner != rob.id:
+                other = self._robot_by_id[owner]
+                if not other.path:
+                    continue  # doi roboti deja suprapusi; coliziunea s-a numarat
+                self._evict(other, t, queue)
+            self._reserve(rob.id, key)
+
+    def _evict(self, rob: Robot, t: Time, queue: list[str]) -> None:
+        rob.path = []
+        self._release(rob.id)
+        if self._needs_plan(rob):
+            self._reserve(rob.id, (rob.pos, t))
+            if rob.id not in queue:
+                queue.append(rob.id)
+        else:
+            self._hold(rob, t, queue)
+
+    def _reserve(self, rid: str, key: Key) -> None:
+        if self.reservations.get(key, rid) != rid:
+            return
+        self.reservations[key] = rid
+        self._owned[rid].append(key)
+
+    def _release(self, rid: str) -> None:
+        for key in self._owned[rid]:
+            if self.reservations.get(key) == rid:
+                del self.reservations[key]
+        self._owned[rid] = []
 
     def _valid_move(self, src: Pos, dst: Pos) -> bool:
         dist = abs(src[0] - dst[0]) + abs(src[1] - dst[1])

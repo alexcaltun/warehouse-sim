@@ -143,6 +143,7 @@ class Simulation:
             makespan=max((tk.completed_at for tk in done if tk.completed_at is not None), default=0),
             throughput=len(done) / max(self.t, 1),
             avg_wait=sum(waits) / len(waits) if waits else 0.0,
+            max_wait=max(waits, default=0),
             avg_service=sum(services) / len(services) if services else 0.0,
             collisions=self.collisions,
             deadlocks=self.deadlocks,

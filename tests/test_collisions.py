@@ -195,11 +195,6 @@ def test_warehouse_makespan_cost_of_safety() -> None:
     assert with_res.makespan >= without.makespan
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason="Metrics.max_wait lipseste: types.py e blocat la editare pentru agent.",
-)
 def test_max_wait_at_least_avg_wait() -> None:
     for m in (run_corridor(True), warehouse_metrics(True), warehouse_metrics(False)):
         assert m.max_wait >= m.avg_wait  # type: ignore[attr-defined]

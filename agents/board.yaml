@@ -14,14 +14,12 @@
   owner: agy
   title: "Alocatori: greedy-nearest si Hungarian"
   touches: [sim/allocator/, tests/test_allocator.py]
-  blocked_by: [T-001]
   status: todo
 
 - id: T-004
   owner: claude
   title: "Prevenire coliziuni: reservation table + prioritized planning"
   touches: [sim/planner/prioritized.py, tests/test_collisions.py]
-  blocked_by: [T-002]
   status: todo
 
 - id: T-005

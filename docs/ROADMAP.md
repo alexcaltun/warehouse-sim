@@ -14,9 +14,18 @@ de asteptare, coliziuni, deadlock-uri, la densitate variabila de roboti (5-50).
 
 ## Stare
 - [x] Fundatie: types.py, world.py, baseline.py
-- [ ] T-001 engine (claude) — in lucru
-- [ ] T-002 A* (agy) — in lucru
-- [ ] T-003, T-004, T-005 — blocate
+- [x] T-001 engine (claude)
+- [x] T-002 A* (agy)
+- [ ] T-003 alocatori Hungarian + FIFO (agy) — in lucru
+- [ ] T-004 evitare coliziuni (claude) — in lucru
+- [ ] T-005 sweep + grafice — blocat de T-003, T-004
+
+## Rezultate masurate pana acum
+20x20, 10 roboti, 30 task-uri, seed 3, NearestAllocator:
+- manhattan-naive: 0/30 livrate, deadlock dupa 84 ticks
+- astar: 30/30 livrate, 162 ticks, throughput 0.185, 176 coliziuni
+A* verificat independent contra BFS pe 300 de perechi: drumuri optime, 0.6 ms pe 100x100.
+ATENTIE: cifrele sunt o limita superioara - robotii inca trec unii prin altii pana la T-004.
 
 ## Decizii luate
 - 2026-10-10: statiile excluse din pickup_points — altfel task-urile aveau

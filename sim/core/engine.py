@@ -6,6 +6,7 @@ from sim.core.types import Allocator, Grid, Metrics, Planner, Pos, Robot, Task, 
 
 DEADLOCK_TICKS = 50
 PARK_HORIZON = 20
+MAX_EVAC_TRIES = 8
 
 Key = tuple[Pos, Time]
 
@@ -28,12 +29,21 @@ class Simulation:
         self.allocator = allocator
         self.max_ticks = max_ticks
         self.use_reservations = use_reservations
+        # Un robot oprit isi rezerva celula pe tot orizontul de cautare al planner-ului
+        # (max_wait_steps + 4 * distanta), altfel altii planifica "prin el, dupa ce pleaca".
+        self.park_horizon = max(
+            PARK_HORIZON,
+            getattr(planner, "max_wait_steps", 0) + 4 * (grid.rows + grid.cols),
+        )
 
         self.t: Time = 0
         self.pending: list[Task] = []
         self.collisions = 0
         self.deadlocks = 0
+        self.evacuations = 0
         self.reservations: dict[Key, str] = {}
+        self._evacuating: set[str] = set()
+        self._evacuated_tick: set[str] = set()
         self._owned: dict[str, list[Key]] = {rob.id: [] for rob in self.robots}
         self._robot_by_id: dict[str, Robot] = {rob.id: rob for rob in self.robots}
         self._task_by_id: dict[str, Task] = {tk.id: tk for tk in self.tasks}
@@ -147,6 +157,7 @@ class Simulation:
             avg_service=sum(services) / len(services) if services else 0.0,
             collisions=self.collisions,
             deadlocks=self.deadlocks,
+            evacuations=self.evacuations,
         )
 
     def _finished(self) -> bool:
@@ -184,6 +195,13 @@ class Simulation:
         for rid in sorted(self._owned):
             self._owned[rid] = [k for k in self._owned[rid] if k[1] >= t]
 
+        self._evacuated_tick = set()
+        # Un robot in evacuare care tocmai a primit task renunta la evacuare.
+        for rob in self.robots:
+            if rob.id in self._evacuating and (rob.task_id is not None or not rob.path):
+                self._evacuating.discard(rob.id)
+                rob.path = []
+
         queue: list[str] = []
         # Robotii care urmeaza sa planifice ocupa doar celula curenta, la momentul t,
         # ca vecinii sa le vada pozitia pentru verificarea schimbului de pozitii.
@@ -204,24 +222,163 @@ class Simulation:
                 continue
             self._release(rob.id)
             self._reserve(rob.id, (rob.pos, t))
-            path = self.planner.plan(self.grid, rob.pos, self._goal(rob), self.reservations, t)
-            if path:
-                rob.path = list(path)
-                for i, cell in enumerate(rob.path):
-                    self._reserve(rob.id, (cell, t + 1 + i))
-                end = t + len(rob.path)
-                for tau in range(end + 1, end + PARK_HORIZON + 1):
-                    self._reserve(rob.id, (rob.path[-1], tau))
-            else:
-                failed.append(rob)
-                self._hold(rob, t, queue)
+            goal = self._goal(rob)
+            if self._reachable(rob, goal, ignore=[]):
+                path = self.planner.plan(self.grid, rob.pos, goal, self.reservations, t)
+                if path:
+                    self._set_path(rob, path, t)
+                    continue
+            # Evacuarea ajuta doar cand robotii liberi parcati taie accesul; daca tinta
+            # e accesibila si totusi nu exista plan, cauza e alta (trafic, orizont).
+            elif self._make_way(rob, self._relaxed_route(rob, goal, t), t):
+                # Celula-problema s-a eliberat: robotul replanifica in acelasi tick.
+                self._release(rob.id)
+                self._reserve(rob.id, (rob.pos, t))
+                queue.append(rob.id)
+                continue
+            failed.append(rob)
+            if rob.carrying is None and rob.task_id is not None:
+                # Renunta la task imediat, ca sa poata fi evacuat in acest tick.
+                self._task_by_id[rob.task_id].assigned_to = None
+                rob.task_id = None
+            self._hold(rob, t, queue)
         return failed
 
+    def _set_path(self, rob: Robot, path: list[Pos], t: Time) -> None:
+        rob.path = list(path)
+        for i, cell in enumerate(rob.path):
+            self._reserve(rob.id, (cell, t + 1 + i))
+        end = t + len(rob.path)
+        for tau in range(end + 1, end + self.park_horizon + 1):
+            self._reserve(rob.id, (rob.path[-1], tau))
+
+    def _reachable(self, rob: Robot, goal: Pos, ignore: list[str]) -> bool:
+        """Test ieftin inaintea planner-ului. Un robot parcat (oprit, sau la capatul
+        drumului) isi tine celula pe tot orizontul planner-ului, deci celula lui e zid
+        din momentul in care o ocupa. Daca tinta nu se poate atinge nici macar ignorand
+        restul rezervarilor, planner-ul ar esua oricum, dupa o cautare completa."""
+        t = self.t
+        walls: dict[Pos, Time] = {}
+        for r in self.robots:
+            if r is rob or r.id in ignore:
+                continue
+            if r.path:
+                cell, since = r.path[-1], t + len(r.path)
+            elif self.reservations.get((r.pos, t + 1)) == r.id:
+                cell, since = r.pos, t
+            else:
+                continue
+            walls[cell] = min(walls.get(cell, since), since)
+        if goal in walls:
+            return False
+        dist = {rob.pos: 0}
+        frontier = [rob.pos]
+        i = 0
+        while i < len(frontier):
+            cur = frontier[i]
+            i += 1
+            for nxt in self.grid.neighbors(cur):
+                d = dist[cur] + 1
+                if nxt in dist or walls.get(nxt, t + d + 1) <= t + d:
+                    continue
+                if nxt == goal:
+                    return True
+                dist[nxt] = d
+                frontier.append(nxt)
+        return False
+
+    def _parked_idle(self) -> list[Robot]:
+        """Roboti liberi, opriti, care pot fi inca evacuati in tick-ul curent."""
+        return [
+            rob
+            for rob in self.robots
+            if rob.task_id is None and not rob.path and rob.id not in self._evacuated_tick
+        ]
+
+    def _relaxed_route(self, rob: Robot, goal: Pos, t: Time) -> list[Pos]:
+        """Drumul pe care l-ar avea robotul daca robotii liberi parcati n-ar exista."""
+        parked = [r.id for r in self._parked_idle()]
+        if not parked or not self._reachable(rob, goal, ignore=parked):
+            return []
+        relaxed = {k: v for k, v in self.reservations.items() if v not in parked}
+        return self.planner.plan(self.grid, rob.pos, goal, relaxed, t)
+
+    def _make_way(self, rob: Robot, route: list[Pos], t: Time) -> bool:
+        """Evacueaza robotii liberi parcati pe `route`. True daca s-a mutat macar unul."""
+        on_route = {cell: i for i, cell in reversed(list(enumerate(route)))}
+        blockers = sorted(
+            (r for r in self._parked_idle() if r.pos in on_route),
+            key=lambda r: (on_route[r.pos], r.id),
+        )
+        if not blockers:
+            return False
+        # Cat timp se cauta celule de evacuare, robotul cu task ramane pe loc.
+        temp = [
+            (rob.pos, tau)
+            for tau in range(t + 1, t + self.park_horizon + 1)
+            if (rob.pos, tau) not in self.reservations
+        ]
+        for key in temp:
+            self._reserve(rob.id, key)
+        keep_clear = [*route, rob.pos]
+        moved = False
+        for blocker in blockers:
+            self._evacuated_tick.add(blocker.id)
+            if self._evacuate(blocker, keep_clear, t):
+                moved = True
+        if not moved:
+            for key in temp:
+                del self.reservations[key]
+            self._owned[rob.id] = [k for k in self._owned[rob.id] if k not in temp]
+        return moved
+
+    def _evacuate(self, rob: Robot, keep_clear: list[Pos], t: Time) -> bool:
+        self._release(rob.id)
+        self._reserve(rob.id, (rob.pos, t))
+        excluded = set(keep_clear)
+        for tk in self.tasks:
+            if tk.completed_at is None:
+                excluded.add(tk.pickup)
+                excluded.add(tk.dropoff)
+        excluded.update(cell for (cell, _), owner in self.reservations.items() if owner != rob.id)
+
+        stopped = [r.pos for r in self.robots if r is not rob and not r.path]
+        tries = 0
+        for cell in self._cells_by_distance(rob.pos, stopped):
+            if cell in excluded:
+                continue
+            path = self.planner.plan(self.grid, rob.pos, cell, self.reservations, t)
+            if path:
+                self._set_path(rob, path, t)
+                self._evacuating.add(rob.id)
+                self.evacuations += 1
+                return True
+            tries += 1
+            if tries >= MAX_EVAC_TRIES:
+                break
+        self._release(rob.id)
+        for tau in range(t, t + self.park_horizon + 1):
+            self._reserve(rob.id, (rob.pos, tau))
+        return False
+
+    def _cells_by_distance(self, start: Pos, blocked: list[Pos]) -> list[Pos]:
+        """BFS care ocoleste robotii opriti; ordinea vecinilor e fixa, deci si rezultatul."""
+        order = [start]
+        seen = {start, *blocked}
+        i = 0
+        while i < len(order):
+            for nxt in self.grid.neighbors(order[i]):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    order.append(nxt)
+            i += 1
+        return order[1:]
+
     def _hold(self, rob: Robot, t: Time, queue: list[str]) -> None:
-        """Robot fara drum: rezerva celula curenta pe t..t+PARK_HORIZON. Un robot
+        """Robot fara drum: rezerva celula curenta pe t..t+park_horizon. Un robot
         care si-a planificat trecerea prin celula asta pierde drumul si replanifica."""
         self._release(rob.id)
-        for tau in range(t, t + PARK_HORIZON + 1):
+        for tau in range(t, t + self.park_horizon + 1):
             key = (rob.pos, tau)
             owner = self.reservations.get(key)
             if owner is not None and owner != rob.id:

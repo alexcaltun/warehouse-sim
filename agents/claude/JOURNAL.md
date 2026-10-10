@@ -193,3 +193,104 @@ sa-l ocoleasca. Robotii care stau pe loc isi rezerva celula curenta. Cu `use_res
   fara drum isi rezerva celula curenta", aplicata pe un layout cu culoare de latime 1, duce
   sistematic la deadlock. Am implementat regula literal si am marcat testele afectate xfail
   strict, in loc sa caut un seed norocos care sa treaca.
+
+## T-006 — Eliberarea robotilor parcati (evacuare locala) — 2026-10-11
+**Fisiere atinse:**
+- `sim/core/engine.py` (modificat)
+- `sim/core/types.py` (doar `Metrics.evacuations: int = 0`)
+- `tests/test_collisions.py` (scos xfail, acceptanta parametrizata pe seed-urile 1, 3, 7)
+- `tests/test_evacuation.py` (nou)
+- `agents/claude/JOURNAL.md` (acest jurnal)
+- `max_wait` era deja completat de Alex in `6900c9f`; n-a mai fost nimic de facut acolo.
+
+**Ce am implementat:**
+Cand un robot cu task nu gaseste drum pentru ca robotii liberi parcati ii taie accesul, engine-ul
+calculeaza drumul pe care l-ar avea fara ei, iar robotii liberi de pe acel drum se dau la o parte
+spre cea mai apropiata celula libera care nu incurca pe nimeni. Robotul cu task replanifica in
+acelasi tick. Ca mecanismul sa functioneze, un robot oprit isi rezerva acum celula pe tot
+orizontul planner-ului (nu doar 20 de tick-uri), iar un robot fara marfa al carui plan esueaza
+renunta imediat la task. Evacuarile sunt numarate in `Metrics.evacuations`.
+
+**Decizii si de ce:**
+- Declansare: planul esueaza SI tinta e inaccesibila cand robotii parcati sunt considerati
+  ziduri, dar accesibila fara robotii liberi. Blocantii sunt robotii liberi de pe drumul
+  "relaxat" (planificat ignorand rezervarile lor). Daca tinta e accesibila si planul tot esueaza,
+  cauza e traficul sau orizontul, iar evacuarea nu ajuta.
+- Celula de evacuare: cea mai apropiata prin BFS care ocoleste robotii opriti; nerezervata de
+  nimeni in viitor; nu e pickup/dropoff al unui task neterminat; nu e pe drumul robotului care
+  cere trecere si nici celula lui ("se da la o parte" = iese de pe traseu). Se incearca maximum
+  8 candidati (`MAX_EVAC_TRIES`), ca un esec sa nu coste prea mult.
+- Cat timp se cauta evacuarea, robotul cu task isi tine celula; daca nu s-a mutat nimeni,
+  rezervarile temporare se sterg.
+- Abatere importanta fata de T-004: orizontul de parcare pentru robotii opriti si pentru capatul
+  drumului nu mai e 20, ci `max_wait_steps + 4 * (rows + cols)` (168 pe 20x20), adica tot
+  orizontul planner-ului. Cu 20, un robot gasea drumuri care asteptau 21+ tick-uri dupa un robot
+  oprit; rezervarea acestuia se reimprospata, drumul era invalidat la fiecare tick, planul nu
+  esua niciodata (deci evacuarea nu pornea), iar drumurile-fantoma blocau tintele altora.
+  Masurat (cu evacuarea activa): cu 20 se livrau 6-27/30 si deadlock pe toate seed-urile 0-9;
+  cu orizontul lung, 9/10 seed-uri complete.
+  Formula citeste `max_wait_steps` din planner prin `getattr`, deci depinde de formula de orizont
+  din PrioritizedPlanner.
+- Robotul fara marfa al carui plan esueaza renunta la task imediat, nu la finalul tick-ului.
+  Altfel NearestAllocator ii reda un task la fiecare tick, inainte de planificare, si robotul
+  nu e niciodata "liber" (task_id None) cand s-ar putea evacua (observat pe seed 8).
+  Efectul asupra metricilor e acelasi: task-ul revine oricum in coada la tick-ul urmator.
+- Test rapid `_reachable` inainte de planner: BFS in care celula unui robot parcat e zid din
+  momentul in care il ocupa. E o conditie necesara, deci nu schimba rezultatul planner-ului; doar
+  sare peste cautari spatiu-timp care oricum ar esua. Timp pe rulare: de la 16-41 s la 1,3-4 s.
+- Un robot in evacuare care primeste task renunta la evacuare si planifica spre task.
+- `evacuations` numara robotii mutati efectiv, nu incercarile.
+- Board: T-006 nu exista in `agents/board.yaml`; am urmat lista de fisiere din spec.
+
+**Teste scrise:**
+- `test_parked_robot_steps_aside_in_corridor` — coridor de latime 1 cu nisa: robotul liber intra in nisa, celalalt livreaza, 0 coliziuni.
+- `test_parked_robot_without_reservations_never_moves` — acelasi coridor fara rezervari: 0 evacuari, robotul liber nu se misca, coliziuni >= 1.
+- `test_parked_robot_leaves_dropoff_before_arrival` — robot liber pe dropoff-ul unui task activ: pleaca inainte de livrare, 0 coliziuni.
+- `test_full_grid_without_evacuation_cell_terminates` — grid 1x3 plin: fara exceptii, 0 evacuari, se opreste prin detectia de deadlock.
+- `test_evacuation_is_deterministic` — doua rulari pe depozit (seed 1) dau `Metrics` egale, cu evacuari > 0.
+- `test_no_evacuations_without_reservations` — fara rezervari: 0 evacuari, 30/30, tabela de rezervari goala.
+- `test_warehouse_reservations_delivers_all[1,3,7]` (fost xfail) — tasks_done == 30 si deadlocks == 0.
+- `test_warehouse_reservations_no_collisions[1,3,7]` — collisions == 0.
+- `test_warehouse_makespan_cost_of_safety[1,3,7]` (fost xfail) — ambele rulari 30/30, makespan cu rezervari >= fara.
+- `test_warehouse_without_reservations_collides[1,3,7]` — fara rezervari: 30/30 si coliziuni > 0.
+
+**Rezultat pytest:**
+`61 passed in 12.66s`
+
+**Limitari cunoscute:**
+- Acceptanta (10 roboti, 30 task-uri, depozit 20x20):
+
+  | seed | fara rezervari: livrate / makespan / coliziuni | cu rezervari: livrate / makespan / coliziuni / deadlock / evacuari |
+  |---|---|---|
+  | 1 | 30 / 160 / 168 | 30 / 258 / 0 / 0 / 21 |
+  | 3 | 30 / 161 / 176 | 30 / 290 / 0 / 0 / 40 |
+  | 7 | 30 / 163 / 175 | 30 / 339 / 0 / 0 / 45 |
+
+  Costul sigurantei: makespan de 1,6-2,1 ori mai mare.
+- Pe seed-urile 0-39 (acelasi scenariu): 35/40 reusesc complet; coliziuni 0 pe toate 40.
+  Cele 5 esecuri, clasificate:
+  - seed 0 si 10: orizontul planner-ului (`8 + 4 * distanta Manhattan`) e mai scurt decat drumul
+    real. Exemplu: de la (9,3) la statia (9,0) Manhattan e 3, deci orizont 20, dar drumul ocolind
+    rafturile are 21 de pasi. Robotul n-ar putea planifica nici singur in depozit. Problema e in
+    `prioritized.py`, pe care T-006 nu il permite.
+  - seed 16 si 37: robotul liber de pe tinta are iesiri doar pe traseul celui care cere trecere
+    sau prin spatele altor roboti liberi. Ar trebui evacuare in lant.
+  - seed 27: gridlock intre 6 roboti care cara marfa; mecanismul evacueaza doar roboti liberi.
+- Rezultatele sunt sensibile la detalii de implementare: in timpul dezvoltarii seed 8 a trecut
+  din 30/30 in 29/30 si inapoi. Cifra 35/40 descrie exact aceasta versiune.
+- Prioritatea ramane fixa dupa id.
+- Viteza masurata doar pe 20x20 cu 10 roboti (1,3-4 s pe rulare); la 50 de roboti (T-005) nu stiu.
+
+**Ramas nefacut:**
+- PrioritizedPlanner: orizont calculat din distanta reala (BFS pe grid static) in loc de
+  Manhattan. Ar rezolva seed-urile 0 si 10.
+- Evacuare in lant (un robot liber poate cere si el altor roboti liberi sa se mute).
+- Solutie pentru gridlock intre roboti cu marfa (ex. prioritate dinamica, sau voie pentru un
+  robot cu marfa sa se dea la o parte).
+- `agents/board.yaml`: adaugat T-006 si actualizat statusurile.
+
+**M-a blocat:**
+Nimic blocant. Neclar in spec: (1) spec-ul spune ca singura cauza e robotul liber parcat; am gasit
+inca doua cauze necesare (drumurile-fantoma din orizontul de 20 de tick-uri si momentul in care
+allocator-ul redistribuie task-urile), rezolvate in engine. (2) "Celula nerezervata" si "celula-
+problema" nu erau definite precis; interpretarile sunt la "Decizii".

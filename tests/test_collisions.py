@@ -48,11 +48,14 @@ def run_corridor(use_reservations: bool) -> Metrics:
     return sim.run()
 
 
-def run_warehouse(use_reservations: bool) -> Metrics:
+ACCEPTANCE_SEEDS = [1, 3, 7]
+
+
+def run_warehouse(use_reservations: bool, seed: int = 3) -> Metrics:
     grid = make_warehouse(20, 20)
     cells = free_cells(grid)
     robots = [Robot(id=f"r{i:02d}", pos=cells[i * 7 % len(cells)]) for i in range(10)]
-    tasks = random_tasks(grid, 30, horizon=50, seed=3)
+    tasks = random_tasks(grid, 30, horizon=50, seed=seed)
     planner = PrioritizedPlanner(base=AStarPlanner()) if use_reservations else AStarPlanner()
     sim = Simulation(
         grid, robots, tasks, planner, NearestAllocator(),
@@ -62,8 +65,8 @@ def run_warehouse(use_reservations: bool) -> Metrics:
 
 
 @cache
-def warehouse_metrics(use_reservations: bool) -> Metrics:
-    return run_warehouse(use_reservations)
+def warehouse_metrics(use_reservations: bool, seed: int = 3) -> Metrics:
+    return run_warehouse(use_reservations, seed)
 
 
 def respects(path: list[Pos], res: Res, t: Time) -> bool:
@@ -162,12 +165,14 @@ def test_corridor_makespan_cost_of_safety() -> None:
     assert with_res.makespan >= without.makespan
 
 
-def test_warehouse_reservations_no_collisions() -> None:
-    assert warehouse_metrics(True).collisions == 0
+@pytest.mark.parametrize("seed", ACCEPTANCE_SEEDS)
+def test_warehouse_reservations_no_collisions(seed: int) -> None:
+    assert warehouse_metrics(True, seed).collisions == 0
 
 
-def test_warehouse_without_reservations_collides() -> None:
-    m = warehouse_metrics(False)
+@pytest.mark.parametrize("seed", ACCEPTANCE_SEEDS)
+def test_warehouse_without_reservations_collides(seed: int) -> None:
+    m = warehouse_metrics(False, seed)
     assert m.tasks_done == 30
     assert m.collisions > 0
 
@@ -176,21 +181,16 @@ def test_reservations_deterministic() -> None:
     assert run_warehouse(True) == warehouse_metrics(True)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Robotii liberi raman parcati pe statii/culoare de latime 1 si blocheaza "
-    "livrarile; spec-ul nu are mecanism de eliberare. Vezi agents/claude/JOURNAL.md.",
-)
-def test_warehouse_reservations_delivers_all() -> None:
-    assert warehouse_metrics(True).tasks_done == 30
+@pytest.mark.parametrize("seed", ACCEPTANCE_SEEDS)
+def test_warehouse_reservations_delivers_all(seed: int) -> None:
+    m = warehouse_metrics(True, seed)
+    assert m.tasks_done == 30
+    assert m.deadlocks == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Comparatia de makespan are sens doar daca ambele rulari livreaza tot.",
-)
-def test_warehouse_makespan_cost_of_safety() -> None:
-    with_res, without = warehouse_metrics(True), warehouse_metrics(False)
+@pytest.mark.parametrize("seed", ACCEPTANCE_SEEDS)
+def test_warehouse_makespan_cost_of_safety(seed: int) -> None:
+    with_res, without = warehouse_metrics(True, seed), warehouse_metrics(False, seed)
     assert with_res.tasks_done == without.tasks_done == 30
     assert with_res.makespan >= without.makespan
 

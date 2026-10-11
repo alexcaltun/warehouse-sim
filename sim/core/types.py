@@ -99,6 +99,7 @@ class Metrics:
     avg_service: float = 0.0
     collisions: int = 0
     deadlocks: int = 0
+    evacuations: int = 0
 
     def as_row(self) -> dict[str, float]:
         return {k: float(v) for k, v in self.__dict__.items()}
